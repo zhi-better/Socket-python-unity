@@ -7,6 +7,7 @@ import numpy as np
 
 from PyQt5.QtWidgets import QApplication
 
+
 class FrameInfo:
     def __init__(self):
         self.data_type = None
@@ -29,37 +30,25 @@ class FrameInfo:
         self.data_buffer = b''
 
 
-class TcpSererTools:
-    def __init__(self, host, port):
-        super().__init__()
+class TcpBaseTools:
+    def __init__(self):
         self.callback_fun = None
         self.start_thread = None
-        self.host = host
-        self.port = port
-        self.tcp_server = None
-        self.max_connections = 128
         self.buffer_size = 1024
         # 表示对应协议头的协议类型为：
         # byte(frame header 1)+byte(frame header 2)+byte(cmd)+int(data length)
         self.header_bytes = b'\x0a\x0b'  # 占用两个字节
         self.header_format = "2ssi"
         self.header_length = 8
-        self.socket_init(host, port)
+        self.tcp_socket = None
         self.frame_info = FrameInfo()
-        # self.max_frame_size = 1000000
-        self.tcp_clients = []
 
-    # 初始化服务器
-    def socket_init(self, host, port):
+        # 先创建一个socket
+        self.socket_init()
+
+    def socket_init(self):
         # 1 创建服务端套接字对象
-        self.tcp_server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        # signal_update.emit(0.2, 1, 1, 'socket object created...')
-        # 设置端口复用，使程序退出后端口马上释放
-        self.tcp_server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, True)
-        # 2 绑定端口
-        self.tcp_server.bind((host, port))
-        # signal_update.emit(0.7, 1, 1, "socket bind successfully...")
-        print('server port bind successfully, server host: {}, server port: {}...'.format(host, port))
+        self.tcp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
     def set_callback_fun(self, func):
         self.callback_fun = func
@@ -101,6 +90,8 @@ class TcpSererTools:
                 # 根据回调函数返回对应的内容
                 if self.callback_fun is not None:
                     self.callback_fun(self.frame_info.data_buffer)
+                else:
+                    print('no callback function, recv data: {}'.format(self.frame_info.data_buffer))
                 # 从剩余的数据中尝试检索出对应的数据头
                 # 首先更新 recv_data 的数据的内容
                 # print(self.frame_info.data_buffer)
@@ -127,35 +118,66 @@ class TcpSererTools:
             else:
                 print(recv_data)
 
-    # 客户端的消息处理线程
-    def client_process(self, tcp_client_1, tcp_client_address):
+    def pack_data(self, data, data_type):
+        if type(data) is str:
+            data = data.encode()
+        data_pack = struct.pack(self.header_format, self.header_bytes, data_type, len(data))
+        # print("datalen:{}".format(len(data)))
+        return data_pack + data
+
+        # 客户端的消息处理线程
+    def client_process(self, tcp_client, tcp_client_address):
         # 5 循环接收和发送数据
         while True:
             try:
-                recv_data = tcp_client_1.recv(self.buffer_size)
+                recv_data = tcp_client.recv(self.buffer_size)
             except ConnectionResetError:
-                print("client:{} has closed, it has been remove from the connection pool. ".format(tcp_client_address))
-                tcp_client_1.close()
+                print("client:{} has closed, it has been remove from the connection pool. ".format(
+                    tcp_client_address))
+                tcp_client.close()
                 return
             except ConnectionAbortedError:
-                print("client:{} has closed, it has been remove from the connection pool. ".format(tcp_client_address))
-                tcp_client_1.close()
+                print("client:{} has closed, it has been remove from the connection pool. ".format(
+                    tcp_client_address))
+                tcp_client.close()
                 return
 
             # 另外编写函数处理对应的内容
             self.process_raw_data(recv_data)
 
+
+class TcpSererTools(TcpBaseTools):
+    def __init__(self, host, port):
+        super().__init__()
+        self.host = host
+        self.port = port
+        self.max_connections = 128
+
+        # self.max_frame_size = 1000000
+        self.tcp_clients = []
+
     # 开始的线程函数，外部最好调用 start() 函数，不要调用此函数
     # 否则会阻塞
-    def start_thread_fun(self):
+    def bind_and_listen(self):
+        host = self.host
+        port = self.port
+        # signal_update.emit(0.2, 1, 1, 'socket object created...')
+        # 设置端口复用，使程序退出后端口马上释放
+        self.tcp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, True)
+        # 2 绑定端口
+        self.tcp_socket.bind((host, port))
+        # signal_update.emit(0.7, 1, 1, "socket bind successfully...")
+        print('server port bind successfully, server host: {}, server port: {}...'.format(
+            host, port))
+
         print("server_thread started. ")
         # 3 设置监听
-        self.tcp_server.listen(self.max_connections)
+        self.tcp_socket.listen(self.max_connections)
         print('start to listen connections from client, max client count: {}'.format(
             self.max_connections))
         # 4 循环等待客户端连接请求（也就是最多可以同时有128个用户连接到服务器进行通信）
         while True:
-            tcp_client_1, tcp_client_address = self.tcp_server.accept()
+            tcp_client_1, tcp_client_address = self.tcp_socket.accept()
             self.tcp_clients.append(tcp_client_1)
             # 创建多线程对象
             thd = threading.Thread(target=self.client_process,
@@ -168,28 +190,41 @@ class TcpSererTools:
 
     # 启动服务器
     def start(self):
-        self.start_thread = threading.Thread(target=self.start_thread_fun, daemon=True)
+        self.start_thread = threading.Thread(target=self.bind_and_listen, daemon=True)
         self.start_thread.start()
         print("starting server_thread...")
-
-    def pack_data(self, data, data_type):
-        if type(data) is str:
-            data = data.encode()
-        data_pack = struct.pack(self.header_format, self.header_bytes, data_type, len(data))
-        # print("datalen:{}".format(len(data)))
-        return data_pack+data
 
     def send(self, data):
         self.tcp_clients[0].send(data)
 
 
+class TcpClientTools(TcpBaseTools):
+    def __init__(self):
+        super().__init__()
+
+    def connect_to_server(self, host, port):
+        try:
+            print("connecting to server")
+            self.tcp_socket.connect((host, port))
+        except ConnectionRefusedError as e:
+            print(e)
+            return False
+        print("connected to server successfully. ")
+        self.start_thread = threading.Thread(
+            target=self.client_process, args=(self.tcp_socket, f'{host}:{port}'), daemon=True)
+        self.start_thread.start()
+        self.send(self.pack_data('ok', data_type=b'\1'))
+        return True
+
+    def send(self, data):
+
+        self.tcp_socket.send(data)
+
 if __name__ == '__main__':
-    print("\n")
-    # data_pack = struct.pack("i", 4)
-    # data_pack = struct.pack("2ssl", b'\x0a\x0b', b'\xaa', 255)
-    # data_unpack = struct.unpack('2ssi', data_pack)
-    # print(data_pack)
-    # print(len(data_pack))
     server = TcpSererTools('127.0.0.1', port=4444)
     server.start()
+
+    # client = TcpClientTools()
+    # client.connect_to_server('127.0.0.1', 4444)
+
     time.sleep(100)
