@@ -11,6 +11,8 @@ class Form1(QMainWindow, Ui_form1):
         self.setupUi(self)
         self.signal_ok = pyqtSignal()
         self.signal_cancel = pyqtSignal()
+        self.cmdOK.setVisible(False)
+        self.cmdCancel.setVisible(False)
 
         self.cmdOK.clicked.connect(self.cmdOK_click)
 

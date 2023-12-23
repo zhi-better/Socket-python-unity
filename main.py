@@ -1,5 +1,6 @@
 # 导入套接字模块
 import socket
+import struct
 # 导入线程模块
 import sys
 import threading
@@ -11,10 +12,11 @@ from PyQt5.QtCore import pyqtSignal, QRect, QObject
 from PyQt5.QtWidgets import QApplication, QDesktopWidget
 from pyqt5_plugins.examplebutton import QtWidgets
 
+from SocketTcpTools import TcpSererTools
 from Form1 import Form1
 from FrmInitialize import FrmInitialize
 
-g_connection_pool = []
+
 
 # 仅仅包含进度条和状态栏的运行过程提醒窗口
 class ProgressBar(QtWidgets.QWidget):
@@ -63,6 +65,7 @@ class MainForm(QObject):
     def __init__(self):
         super(MainForm, self).__init__()
         # 窗口初始化
+        self.server = None
         self.login_form = FrmInitialize()
         self.form1 = Form1()
         # self.pbar = ProgressBar(self.signal_connect_client)
@@ -72,89 +75,35 @@ class MainForm(QObject):
         self.login_form.show()
         self.form1.hide()
 
-    def add_client(self, client_ip, client_port):
-        self.form1.addClient(client_ip, client_port)
-
-    def remove_client(self, client_ip, client_port):
-        self.form1.removeClient(client_ip, client_port)
-
-    # 消息处理线程
-    def dispose_client_request(self, tcp_client_1, tcp_client_address):
-        # 5 循环接收和发送数据
-        while True:
-            try:
-                recv_data = tcp_client_1.recv(1048576)
-            except ConnectionResetError:
-                print("client:{} has closed, it has been remove from the connection pool. ".format(tcp_client_address))
-                tcp_client_1.close()
-                g_connection_pool.remove(tcp_client_1)
-                return
-            except ConnectionAbortedError:
-                print("client:{} has closed, it has been remove from the connection pool. ".format(tcp_client_address))
-                tcp_client_1.close()
-                g_connection_pool.remove(tcp_client_1)
-                return
-            # 6 有消息就回复数据，消息长度为 0 就是说明客户端下线了
-            if recv_data:
-                # print("receive data from: {}, data are: {}".format(tcp_client_address, recv_data.decode()))
-                image = np.frombuffer(recv_data, dtype=np.uint8)
-                image = cv2.imdecode(image, cv2.IMREAD_COLOR)
-                image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-                '''
-                请在此处编写处理并显示图片的代码
-                '''
-                # cv2.imshow("hello", image)
-                # cv2.waitKey(0)
-                mainForm.form1.setPicture(img=image)
-                send_data = "pong"
-                tcp_client_1.send(send_data.encode("utf-8"))
-                print("send data to: {}, data are: {}".format(tcp_client_address, send_data))
-            else:
-                print("client:{} has closed, it has been remove from the connection pool. ".format(tcp_client_address))
-                tcp_client_1.close()
-                g_connection_pool.remove(tcp_client_1)
-                break
-
-    # 服务器开启线程
-    def thd_initializeServer(self, ip, port):
-        # 1 创建服务端套接字对象
-        # signal_update.emit(0, 1, 1, 'initializing...')
-        socket.socket()
-        tcp_server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        # signal_update.emit(0.2, 1, 1, 'socket object created...')
-        # 设置端口复用，使程序退出后端口马上释放
-        tcp_server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, True)
-        # 2 绑定端口
-        tcp_server.bind((host, port))
-        # signal_update.emit(0.7, 1, 1, "socket bind successfully...")
-        print('server port bind successfully, server host: {}, server port: {}...'.format(host, port))
-        # 3 设置监听
-        tcp_server.listen(128)
-        print('start to listen connections from client...')
-        # signal_update.emit(1, 1, 1, "socket listen successfully...")
-        # 4 循环等待客户端连接请求（也就是最多可以同时有128个用户连接到服务器进行通信）
-        while True:
-            tcp_client_1, tcp_client_address = tcp_server.accept()
-            self.add_client(tcp_client_address[0], tcp_client_address[1])
-            # 创建多线程对象
-            thd = threading.Thread(target=self.dispose_client_request,
-                                   args=(tcp_client_1, tcp_client_address))
-            g_connection_pool.append(tcp_client_1)
-            # 设置守护主线程  即如果主线程结束了 那子线程中也都销毁了  防止主线程无法退出
-            thd.setDaemon(True)
-            # 启动子线程对象
-            thd.start()
-            print("new client connected, client address: {}, total client count: {}".format(tcp_client_address,
-                                                                                            len(g_connection_pool)))
+    def callback_function(self, recv_data):
+        # print("receive data from: {}, data are: {}".format(tcp_client_address, recv_data.decode()))
+        tim_start = time.time()
+        image = np.frombuffer(recv_data, dtype=np.uint8)
+        image = cv2.imdecode(image, cv2.IMREAD_COLOR)
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        '''
+        请在此处编写处理并显示图片的代码
+        '''
+        # mainForm.form1.setPicture(img=image)
+        edge_image = cv2.cvtColor(cv2.Canny(image, 100, 200), cv2.COLOR_GRAY2BGR)
+        mainForm.form1.setPicture(img=edge_image)
+        # send_data = "pong"
+        # tcp_client_1.send(send_data.encode("utf-8"))
+        '''
+        发送的数据格式主要包括三部分，数据头：2 byte，数据长度：4 byte(int)，后面跟的是数据长度的内容
+        '''
+        image_send_back = cv2.imencode('.jpg', edge_image)
+        # image_send_back = cv2.imencode('.jpg', cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
+        image_send_back = image_send_back[1].tobytes()
+        # print("\rtime cost: {}".format(time.time() - tim_start), end="")
+        self.server.send(self.server.pack_data(image_send_back, b'\1'))
 
     # 初始化服务器函数
     def initializeServer(self, ip, port):
-        # 首先显示进度条的窗口，使得程序更加的智能看起来
-        # 先启动服务器
-        self.thd = threading.Thread(target=self.thd_initializeServer,
-                                    args=(ip, port))
-        self.thd.setDaemon(True)  # 设置为守护线程
-        self.thd.start()
+        # self.thd.start()
+        self.server = TcpSererTools(ip, port)
+        self.server.set_callback_fun(self.callback_function)
+        self.server.start()
         # 窗体显示
         self.form1.show()
         self.login_form.hide()

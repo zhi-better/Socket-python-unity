@@ -1,0 +1,195 @@
+import socket
+import struct
+import sys
+import threading
+import time
+import numpy as np
+
+from PyQt5.QtWidgets import QApplication
+
+class FrameInfo:
+    def __init__(self):
+        self.data_type = None
+        self.data_all_length = 0
+        self.data_recv_length = 0
+        self.data_buffer = b''
+
+    def set_buffer_data(self, data):
+        self.data_buffer = data
+
+    def set(self, data_type, data_all_length):
+        self.data_type = data_type
+        self.data_all_length = data_all_length
+        self.data_recv_length = 0
+
+    def reset(self):
+        self.data_type = None
+        self.data_all_length = 0
+        self.data_recv_length = 0
+        self.data_buffer = b''
+
+
+class TcpSererTools:
+    def __init__(self, host, port):
+        super().__init__()
+        self.callback_fun = None
+        self.start_thread = None
+        self.host = host
+        self.port = port
+        self.tcp_server = None
+        self.max_connections = 128
+        self.buffer_size = 1024
+        # 表示对应协议头的协议类型为：
+        # byte(frame header 1)+byte(frame header 2)+byte(cmd)+int(data length)
+        self.header_bytes = b'\x0a\x0b'  # 占用两个字节
+        self.header_format = "2ssi"
+        self.header_length = 8
+        self.socket_init(host, port)
+        self.frame_info = FrameInfo()
+        # self.max_frame_size = 1000000
+        self.tcp_clients = []
+
+    # 初始化服务器
+    def socket_init(self, host, port):
+        # 1 创建服务端套接字对象
+        self.tcp_server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # signal_update.emit(0.2, 1, 1, 'socket object created...')
+        # 设置端口复用，使程序退出后端口马上释放
+        self.tcp_server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, True)
+        # 2 绑定端口
+        self.tcp_server.bind((host, port))
+        # signal_update.emit(0.7, 1, 1, "socket bind successfully...")
+        print('server port bind successfully, server host: {}, server port: {}...'.format(host, port))
+
+    def set_callback_fun(self, func):
+        self.callback_fun = func
+
+    # 判断当前的数据头对不对，如果正确返回解析结果
+    def process_protocol(self, header):
+        header_unpack = struct.unpack(self.header_format, header)
+        if header_unpack[0] == self.header_bytes:
+            return True, header_unpack
+        else:
+            return False, None
+
+    def process_raw_data(self, recv_data):
+        '''
+        关于操作：
+            本函数应该具有递归功能，否则无法处理复杂任务
+        关于消息接收的逻辑处理：
+        1. 首先判断当前是否已经接收过帧头 (self.frame_info.data_type is not None)
+            接收过：
+                根据帧头的数据长度接收对应的数据体内容
+            没接收过：
+            判断当前接收的数据长度是否满足帧头的长度
+                满足：尝试解析
+                    解析失败：正常传输数据
+                    解析成功：如果有其他的数据，继续接收处理后续的数据
+                不满足：将本次数据输出，丢弃此次的数据 !!!
+        '''
+        # 如果已经接收过数据头，直接继续接收内容
+        if self.frame_info.data_type is not None:
+            # 首先计算剩余的数据包长度
+            recv_len_left = self.frame_info.data_all_length - self.frame_info.data_recv_length
+            # 然后计算本次可以接收的数据长度，选取数据长度和剩余接收长度的最小值
+            recv_len_real = min(recv_len_left, len(recv_data))
+            self.frame_info.data_buffer += recv_data[:recv_len_real]
+            # 更新对应的接收的数据长度
+            self.frame_info.data_recv_length = len(self.frame_info.data_buffer)
+            # 判断当前是否已经接受完本帧的内容
+            if self.frame_info.data_recv_length >= self.frame_info.data_all_length:
+                # 根据回调函数返回对应的内容
+                if self.callback_fun is not None:
+                    self.callback_fun(self.frame_info.data_buffer)
+                # 从剩余的数据中尝试检索出对应的数据头
+                # 首先更新 recv_data 的数据的内容
+                # print(self.frame_info.data_buffer)
+                self.frame_info.reset()
+                recv_data = recv_data[recv_len_real:len(recv_data)]
+                if len(recv_data) != 0:
+                    self.process_raw_data(recv_data)
+            else:
+                return
+            # 从剩余的数据中尝试解析数据头
+        else:
+            if len(recv_data) >= self.header_length:
+                ret = self.process_protocol(recv_data[:self.header_length])
+                if ret[0]:
+                    # 打印出协议对应的内容
+                    # print(ret[1])
+                    self.frame_info.set(ret[1][1], ret[1][2])
+                    # 此处还得继续判断当前是否转换完了，如果没有的话需要继续转换接收到的内容
+                    recv_data = recv_data[self.header_length:len(recv_data)]
+                    if len(recv_data) != 0:
+                        self.process_raw_data(recv_data)
+                else:
+                    print(recv_data)
+            else:
+                print(recv_data)
+
+    # 客户端的消息处理线程
+    def client_process(self, tcp_client_1, tcp_client_address):
+        # 5 循环接收和发送数据
+        while True:
+            try:
+                recv_data = tcp_client_1.recv(self.buffer_size)
+            except ConnectionResetError:
+                print("client:{} has closed, it has been remove from the connection pool. ".format(tcp_client_address))
+                tcp_client_1.close()
+                return
+            except ConnectionAbortedError:
+                print("client:{} has closed, it has been remove from the connection pool. ".format(tcp_client_address))
+                tcp_client_1.close()
+                return
+
+            # 另外编写函数处理对应的内容
+            self.process_raw_data(recv_data)
+
+    # 开始的线程函数，外部最好调用 start() 函数，不要调用此函数
+    # 否则会阻塞
+    def start_thread_fun(self):
+        print("server_thread started. ")
+        # 3 设置监听
+        self.tcp_server.listen(self.max_connections)
+        print('start to listen connections from client, max client count: {}'.format(
+            self.max_connections))
+        # 4 循环等待客户端连接请求（也就是最多可以同时有128个用户连接到服务器进行通信）
+        while True:
+            tcp_client_1, tcp_client_address = self.tcp_server.accept()
+            self.tcp_clients.append(tcp_client_1)
+            # 创建多线程对象
+            thd = threading.Thread(target=self.client_process,
+                                   args=(tcp_client_1, tcp_client_address), daemon=True)
+            # 设置守护主线程  即如果主线程结束了 那子线程中也都销毁了  防止主线程无法退出
+            thd.setDaemon(True)
+            # 启动子线程对象
+            thd.start()
+            print("new client connected, client address: {}, total client count: {}".format(tcp_client_address, 1))
+
+    # 启动服务器
+    def start(self):
+        self.start_thread = threading.Thread(target=self.start_thread_fun, daemon=True)
+        self.start_thread.start()
+        print("starting server_thread...")
+
+    def pack_data(self, data, data_type):
+        if type(data) is str:
+            data = data.encode()
+        data_pack = struct.pack(self.header_format, self.header_bytes, data_type, len(data))
+        # print("datalen:{}".format(len(data)))
+        return data_pack+data
+
+    def send(self, data):
+        self.tcp_clients[0].send(data)
+
+
+if __name__ == '__main__':
+    print("\n")
+    # data_pack = struct.pack("i", 4)
+    # data_pack = struct.pack("2ssl", b'\x0a\x0b', b'\xaa', 255)
+    # data_unpack = struct.unpack('2ssi', data_pack)
+    # print(data_pack)
+    # print(len(data_pack))
+    server = TcpSererTools('127.0.0.1', port=4444)
+    server.start()
+    time.sleep(100)
