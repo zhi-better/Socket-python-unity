@@ -3,10 +3,19 @@ import struct
 import sys
 import threading
 import time
+from enum import Enum
+
 import numpy as np
 
 from PyQt5.QtWidgets import QApplication
 
+
+class DataType(Enum):
+    TypeNone = b'\0'
+    TypeInteger = b'\1'
+    TypeFloat = b'\2'
+    TypeString = b'\3'
+    TypeBinary = b'\4'
 
 class FrameInfo:
     def __init__(self):
@@ -47,14 +56,28 @@ class TcpBaseTools:
         self.socket_init()
 
     def socket_init(self):
+        """
+        初始化创建一个socket
+        :return:
+        """
         # 1 创建服务端套接字对象
         self.tcp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
     def set_callback_fun(self, func):
+        """
+        设置程序的回调函数，主要用于主程序处理经过解码后的原始数据
+        :param func: 回调函数地址
+        :return:
+        """
         self.callback_fun = func
 
-    # 判断当前的数据头对不对，如果正确返回解析结果
+
     def process_protocol(self, header):
+        """
+        处理数据包的头部数据，返回值的第二个内容为解码后的结构体
+        :param header: 头部原始数据
+        :return:
+        """
         header_unpack = struct.unpack(self.header_format, header)
         if header_unpack[0] == self.header_bytes:
             return True, header_unpack
@@ -62,6 +85,11 @@ class TcpBaseTools:
             return False, None
 
     def process_raw_data(self, recv_data):
+        """
+        处理接收到的原始数据，核心代码
+        :param recv_data:
+        :return:
+        """
         '''
         关于操作：
             本函数应该具有递归功能，否则无法处理复杂任务
@@ -118,26 +146,38 @@ class TcpBaseTools:
             else:
                 print(recv_data)
 
-    def pack_data(self, data, data_type):
-        if type(data) is str:
+    def pack_data(self, data, data_type=DataType.TypeNone):
+        """
+        对发送数据进行打包，打包数据包括
+        :param data: 打包原始数据
+        :param data_type: 数据类型: DataType.xxx
+        :return:
+        """
+        if data_type == DataType.TypeString:
             data = data.encode()
         data_pack = struct.pack(self.header_format, self.header_bytes, data_type, len(data))
         # print("datalen:{}".format(len(data)))
         return data_pack + data
 
-        # 客户端的消息处理线程
+
     def client_process(self, tcp_client, tcp_client_address):
+        """
+        主要用于接受 socket 的消息线程
+        :param tcp_client: tcp 连接
+        :param tcp_client_address:  tcp 地址，包含 ip 和 port
+        :return:
+        """
         # 5 循环接收和发送数据
         while True:
             try:
                 recv_data = tcp_client.recv(self.buffer_size)
             except ConnectionResetError:
-                print("client:{} has closed, it has been remove from the connection pool. ".format(
+                print("socket: {} has closed, it has been remove from the connection pool. ".format(
                     tcp_client_address))
                 tcp_client.close()
                 return
             except ConnectionAbortedError:
-                print("client:{} has closed, it has been remove from the connection pool. ".format(
+                print("socket: {} has closed, it has been remove from the connection pool. ".format(
                     tcp_client_address))
                 tcp_client.close()
                 return
@@ -145,6 +185,17 @@ class TcpBaseTools:
             # 另外编写函数处理对应的内容
             self.process_raw_data(recv_data)
 
+    def send(self, tcp_socket, data, pack_data=False, data_type=DataType.TypeNone):
+        """
+        向客户端发送数据
+        :param pack_data:
+        :param tcp_socket:
+        :param data:
+        :return:
+        """
+        if pack_data:
+            data = self.pack_data(data=data, data_type=data_type)
+        tcp_socket.send(data)
 
 class TcpSererTools(TcpBaseTools):
     def __init__(self, host, port):
@@ -159,6 +210,10 @@ class TcpSererTools(TcpBaseTools):
     # 开始的线程函数，外部最好调用 start() 函数，不要调用此函数
     # 否则会阻塞
     def bind_and_listen(self):
+        """
+        服务器进行绑定和监听的函数
+        :return:
+        """
         host = self.host
         port = self.port
         # signal_update.emit(0.2, 1, 1, 'socket object created...')
@@ -190,19 +245,37 @@ class TcpSererTools(TcpBaseTools):
 
     # 启动服务器
     def start(self):
+        """
+        服务器的启动线程，由于服务器监听线程阻塞，此函数单独创建一个线程用于接收客户端的连接
+        :return:
+        """
         self.start_thread = threading.Thread(target=self.bind_and_listen, daemon=True)
         self.start_thread.start()
         print("starting server_thread...")
 
-    def send(self, data):
-        self.tcp_clients[0].send(data)
-
+    def get_client(self, client_idx):
+        """
+        获取服务器的某一个 client 的 socket 连接
+        :param client_idx:
+        :return:
+        """
+        if client_idx >= len(self.tcp_clients):
+            print('unavailable client_idx, client_count: {}'.format(len(self.tcp_clients)))
+            return None
+        else:
+            return self.tcp_clients[client_idx]
 
 class TcpClientTools(TcpBaseTools):
     def __init__(self):
         super().__init__()
 
     def connect_to_server(self, host, port):
+        """
+        连接到 tcp 服务器
+        :param host:
+        :param port:
+        :return:
+        """
         try:
             print("connecting to server")
             self.tcp_socket.connect((host, port))
@@ -216,9 +289,6 @@ class TcpClientTools(TcpBaseTools):
         self.send(self.pack_data('ok', data_type=b'\1'))
         return True
 
-    def send(self, data):
-
-        self.tcp_socket.send(data)
 
 if __name__ == '__main__':
     server = TcpSererTools('127.0.0.1', port=4444)
